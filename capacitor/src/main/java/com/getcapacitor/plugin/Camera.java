@@ -63,6 +63,7 @@ public class Camera extends Plugin {
   private static final String IMAGE_FILE_SAVE_ERROR = "Unable to create photo on disk";
   private static final String IMAGE_PROCESS_NO_FILE_ERROR = "Unable to process image, file not found on disk";
   private static final String UNABLE_TO_PROCESS_IMAGE = "Unable to process image";
+  private static final String UNABLE_TO_PROCESS_VIDEO = "Unable to process video";
   private static final String IMAGE_EDIT_ERROR = "Unable to edit image";
   private static final String IMAGE_GALLERY_SAVE_ERROR = "Unable to save the image in the gallery";
 
@@ -228,7 +229,7 @@ public class Camera extends Plugin {
   public void openPhotos(final PluginCall call) {
     if (checkPhotosPermissions(call)) {
       Intent intent = new Intent(Intent.ACTION_PICK);
-      intent.setType("image/*");
+      intent.setType("image/* video/*");
       startActivityForResult(call, intent, REQUEST_IMAGE_PICK);
     }
   }
@@ -249,10 +250,10 @@ public class Camera extends Plugin {
       return;
     }
 
-    returnResult(call, bitmap, contentUri);
+    returnImageResult(call, bitmap, contentUri);
   }
 
-  public void processPickedImage(PluginCall call, Intent data) {
+  public void processPickedMedia(PluginCall call, Intent data) {
     if (data == null) {
       call.error("No image picked");
       return;
@@ -260,26 +261,36 @@ public class Camera extends Plugin {
 
     Uri u = data.getData();
 
-    InputStream imageStream = null;
+    InputStream mediaStream = null;
 
     try {
-      imageStream = getActivity().getContentResolver().openInputStream(u);
-      Bitmap bitmap = BitmapFactory.decodeStream(imageStream);
+      mediaStream = getActivity().getContentResolver().openInputStream(u);
 
-      if (bitmap == null) {
-        call.reject("Unable to process bitmap");
-        return;
+      if (u.getPath().contains("/video/")) {
+        if (mediaStream == null) {
+          call.reject("Unable to process bitmap for video: " + u.toString());
+          return;
+        }
+
+        returnMovieResult(call, mediaStream, u);
+      } else {
+        Bitmap bitmap = BitmapFactory.decodeStream(mediaStream);
+        if (bitmap == null) {
+          call.reject("Unable to process bitmap for image: " + u.toString());
+          return;
+        }
+
+        returnImageResult(call, bitmap, u);
       }
 
-      returnResult(call, bitmap, u);
     } catch (OutOfMemoryError err) {
       call.error("Out of memory");
     } catch (FileNotFoundException ex) {
       call.error("No such image found", ex);
     } finally {
-      if (imageStream != null) {
+      if (mediaStream != null) {
         try {
-          imageStream.close();
+          mediaStream.close();
         } catch (IOException e) {
           Logger.error(getLogTag(), UNABLE_TO_PROCESS_IMAGE, e);
         }
@@ -319,7 +330,7 @@ public class Camera extends Plugin {
    * @param bitmap
    * @param u
    */
-  private void returnResult(PluginCall call, Bitmap bitmap, Uri u) {
+  private void returnImageResult(PluginCall call, Bitmap bitmap, Uri u) {
     try {
       bitmap = prepareBitmap(bitmap, u);
     } catch (IOException e) {
@@ -350,13 +361,47 @@ public class Camera extends Plugin {
     }
 
     if (settings.getResultType() == CameraResultType.BASE64) {
-      returnBase64(call, exif, bitmapOutputStream);
+      returnBase64(call, exif, "jpeg", bitmapOutputStream.toByteArray());
     } else if (settings.getResultType() == CameraResultType.URI) {
       returnFileURI(call, exif, bitmap, u, bitmapOutputStream);
     } else if (settings.getResultType() == CameraResultType.DATAURL) {
       returnDataUrl(call, exif, bitmapOutputStream);
     } else {
       call.reject(INVALID_RESULT_TYPE_ERROR);
+    }
+
+    // Result returned, clear stored paths
+    imageFileSavePath = null;
+    imageFileUri = null;
+    imageEditedFileSavePath = null;
+  }
+
+  /**
+   * After processing the video, return the final result back to the caller.
+   * @param call
+   * @param movie
+   * @param u
+   */
+  private void returnMovieResult(PluginCall call, InputStream movie, Uri u) {
+    if (settings.getResultType() != CameraResultType.BASE64) {
+      call.reject(INVALID_RESULT_TYPE_ERROR);
+    }
+
+    try {
+      ExifWrapper exif = new ExifWrapper(null);
+
+      ByteArrayOutputStream baos = new ByteArrayOutputStream();
+      int nRead;
+      byte[] data = new byte[2048];
+      while ((nRead = movie.read(data, 0, data.length)) != -1) {
+        baos.write(data, 0, nRead);
+      }
+      baos.flush();
+
+      returnBase64(call, exif, "mov", baos.toByteArray());
+    } catch (Exception e) {
+      call.reject(UNABLE_TO_PROCESS_VIDEO);
+      return;
     }
 
     // Result returned, clear stored paths
@@ -442,12 +487,11 @@ public class Camera extends Plugin {
     call.resolve(data);
   }
 
-  private void returnBase64(PluginCall call, ExifWrapper exif, ByteArrayOutputStream bitmapOutputStream) {
-    byte[] byteArray = bitmapOutputStream.toByteArray();
+  private void returnBase64(PluginCall call, ExifWrapper exif, String format, byte[] byteArray) {
     String encoded = Base64.encodeToString(byteArray, Base64.NO_WRAP);
 
     JSObject data = new JSObject();
-    data.put("format", "jpeg");
+    data.put("format", format);
     data.put("base64String", encoded);
     data.put("exif", exif.toJson());
     call.resolve(data);
@@ -496,10 +540,10 @@ public class Camera extends Plugin {
     if (requestCode == REQUEST_IMAGE_CAPTURE) {
       processCameraImage(savedCall);
     } else if (requestCode == REQUEST_IMAGE_PICK) {
-      processPickedImage(savedCall, data);
+      processPickedMedia(savedCall, data);
     } else if (requestCode == REQUEST_IMAGE_EDIT && resultCode == Activity.RESULT_OK) {
       isEdited = true;
-      processPickedImage(savedCall, data);
+      processPickedMedia(savedCall, data);
     } else if (resultCode == Activity.RESULT_CANCELED && imageFileSavePath != null) {
       imageEditedFileSavePath = null;
       isEdited = true;
