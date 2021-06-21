@@ -229,7 +229,9 @@ public class Camera extends Plugin {
   public void openPhotos(final PluginCall call) {
     if (checkPhotosPermissions(call)) {
       Intent intent = new Intent(Intent.ACTION_PICK);
-      intent.setType("image/* video/*");
+      intent.setType("*/*");
+      intent.putExtra(Intent.EXTRA_MIME_TYPES, new String[] { "image/*", "video/*" });
+        
       startActivityForResult(call, intent, REQUEST_IMAGE_PICK);
     }
   }
@@ -255,7 +257,7 @@ public class Camera extends Plugin {
 
   public void processPickedMedia(PluginCall call, Intent data) {
     if (data == null) {
-      call.error("No image picked");
+      call.error("No media picked");
       return;
     }
 
@@ -266,7 +268,7 @@ public class Camera extends Plugin {
     try {
       mediaStream = getActivity().getContentResolver().openInputStream(u);
 
-      if (u.getPath().contains("/video/")) {
+      if (u.getPath().contains("video")) {
         if (mediaStream == null) {
           call.reject("Unable to process bitmap for video: " + u.toString());
           return;
