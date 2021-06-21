@@ -36,8 +36,7 @@ import java.io.FileNotFoundException;
 import java.io.FileOutputStream;
 import java.io.IOException;
 import java.io.InputStream;
-import java.text.SimpleDateFormat;
-import java.util.Date;
+import java.util.Locale;
 
 /**
  * The Camera plugin makes it easy to take a photo or have the user select a photo
@@ -268,21 +267,32 @@ public class Camera extends Plugin {
     try {
       mediaStream = getActivity().getContentResolver().openInputStream(u);
 
-      if (u.getPath().contains("video")) {
-        if (mediaStream == null) {
-          call.reject("Unable to process bitmap for video: " + u.toString());
-          return;
-        }
+      String path = u.getPath();
+      if (path != null) {
+        String pathLowerCase = path.toLowerCase(Locale.ENGLISH);
+        if (
+          pathLowerCase.contains("/video/") ||
+          pathLowerCase.endsWith(".mp4") ||
+          pathLowerCase.endsWith(".mov") ||
+          pathLowerCase.endsWith(".m4v") || 
+          pathLowerCase.endsWith(".3gp") ||
+          pathLowerCase.endsWith(".3g2")
+        ) {
+          if (mediaStream == null) {
+            call.reject("Unable to process bitmap for video: " + u.toString());
+            return;
+          }
 
-        returnMovieResult(call, mediaStream, u);
-      } else {
-        Bitmap bitmap = BitmapFactory.decodeStream(mediaStream);
-        if (bitmap == null) {
-          call.reject("Unable to process bitmap for image: " + u.toString());
-          return;
-        }
+          returnMovieResult(call, mediaStream, u);
+        } else {
+          Bitmap bitmap = BitmapFactory.decodeStream(mediaStream);
+          if (bitmap == null) {
+            call.reject("Unable to process bitmap for image: " + u.toString());
+            return;
+          }
 
-        returnImageResult(call, bitmap, u);
+          returnImageResult(call, bitmap, u);
+        }
       }
 
     } catch (OutOfMemoryError err) {
