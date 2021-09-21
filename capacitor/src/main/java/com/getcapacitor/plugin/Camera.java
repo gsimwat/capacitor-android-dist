@@ -61,8 +61,10 @@ public class Camera extends Plugin {
   private static final String NO_CAMERA_ACTIVITY_ERROR = "Unable to resolve camera activity";
   private static final String IMAGE_FILE_SAVE_ERROR = "Unable to create photo on disk";
   private static final String IMAGE_PROCESS_NO_FILE_ERROR = "Unable to process image, file not found on disk";
+  private static final String UNABLE_TO_PROCESS_IMAGE_BITMAP = "Unable to process image bitmap";
   private static final String UNABLE_TO_PROCESS_IMAGE = "Unable to process image";
   private static final String UNABLE_TO_PROCESS_VIDEO = "Unable to process video";
+  private static final String UNABLE_TO_RETURN_FILE_URI = "Unable to return file uri";
   private static final String IMAGE_EDIT_ERROR = "Unable to edit image";
   private static final String IMAGE_GALLERY_SAVE_ERROR = "Unable to save the image in the gallery";
 
@@ -261,44 +263,37 @@ public class Camera extends Plugin {
     }
 
     Uri u = data.getData();
-
     InputStream mediaStream = null;
 
     try {
       mediaStream = getActivity().getContentResolver().openInputStream(u);
 
+      if (mediaStream == null) {
+        call.reject("Unable to process media stream: " + u.toString());
+        return;
+      }
+
       String path = u.getPath();
-      if (path != null) {
-        String pathLowerCase = path.toLowerCase(Locale.ENGLISH);
-        if (
-          pathLowerCase.contains("/video/") ||
-          pathLowerCase.endsWith(".mp4") ||
-          pathLowerCase.endsWith(".mov") ||
-          pathLowerCase.endsWith(".m4v") || 
-          pathLowerCase.endsWith(".3gp") ||
-          pathLowerCase.endsWith(".3g2")
-        ) {
-          if (mediaStream == null) {
-            call.reject("Unable to process bitmap for video: " + u.toString());
-            return;
-          }
+      if (path == null) {
+        Logger.warn(getLogTag(), "No path available");
+        return;
+      }
 
-          returnMovieResult(call, mediaStream, u);
-        } else {
-          Bitmap bitmap = BitmapFactory.decodeStream(mediaStream);
-          if (bitmap == null) {
-            call.reject("Unable to process bitmap for image: " + u.toString());
-            return;
-          }
+      // Process and return video
+      if (isVideoPath(path)) {
+        returnMovieResult(call, mediaStream, u);
 
-          returnImageResult(call, bitmap, u);
-        }
+      // Process and return image
+      } else {
+        returnImageResult(call, mediaStream, u);
       }
 
     } catch (OutOfMemoryError err) {
       call.error("Out of memory");
+
     } catch (FileNotFoundException ex) {
       call.error("No such image found", ex);
+
     } finally {
       if (mediaStream != null) {
         try {
@@ -308,6 +303,18 @@ public class Camera extends Plugin {
         }
       }
     }
+  }
+
+  private static boolean isVideoPath(String path) {
+    String pathLowerCase = path.toLowerCase(Locale.ENGLISH);
+
+    return
+      pathLowerCase.contains("/video/") ||
+      pathLowerCase.endsWith(".mp4") ||
+      pathLowerCase.endsWith(".mov") ||
+      pathLowerCase.endsWith(".m4v") ||
+      pathLowerCase.endsWith(".3gp") ||
+      pathLowerCase.endsWith(".3g2");
   }
 
   /**
@@ -336,28 +343,38 @@ public class Camera extends Plugin {
     return Uri.fromFile(outFile);
   }
 
+  private void returnImageResult(PluginCall call, InputStream mediaStream, Uri uri) {
+    Bitmap bitmap = BitmapFactory.decodeStream(mediaStream);
+    if (bitmap == null) {
+      call.reject(UNABLE_TO_PROCESS_IMAGE_BITMAP + ": " + uri.toString());
+      return;
+    }
+
+    returnImageResult(call, bitmap, uri);
+  }
+
   /**
    * After processing the image, return the final result back to the caller.
    * @param call
    * @param bitmap
-   * @param u
+   * @param uri
    */
-  private void returnImageResult(PluginCall call, Bitmap bitmap, Uri u) {
+  private void returnImageResult(PluginCall call, Bitmap bitmap, Uri uri) {
     try {
-      bitmap = prepareBitmap(bitmap, u);
+      bitmap = prepareBitmap(bitmap, uri);
     } catch (IOException e) {
       call.reject(UNABLE_TO_PROCESS_IMAGE);
       return;
     }
 
-    ExifWrapper exif = ImageUtils.getExifData(getContext(), bitmap, u);
+    ExifWrapper exif = ImageUtils.getExifData(getContext(), bitmap, uri);
 
     // Compress the final image and prepare for output to client
     ByteArrayOutputStream bitmapOutputStream = new ByteArrayOutputStream();
     bitmap.compress(Bitmap.CompressFormat.JPEG, settings.getQuality(), bitmapOutputStream);
 
     if (settings.isAllowEditing() && !isEdited) {
-      editImage(call, bitmap, u, bitmapOutputStream);
+      editImage(call, bitmap, uri, bitmapOutputStream);
       return;
     }
 
@@ -374,10 +391,13 @@ public class Camera extends Plugin {
 
     if (settings.getResultType() == CameraResultType.BASE64) {
       returnBase64(call, exif, "jpeg", bitmapOutputStream.toByteArray());
+
     } else if (settings.getResultType() == CameraResultType.URI) {
-      returnFileURI(call, exif, bitmap, u, bitmapOutputStream);
+      returnFileURI(call, exif,"jpeg", uri);
+
     } else if (settings.getResultType() == CameraResultType.DATAURL) {
-      returnDataUrl(call, exif, bitmapOutputStream);
+      returnDataUrl(call, exif, "image", "jpeg", bitmapOutputStream.toByteArray());
+
     } else {
       call.reject(INVALID_RESULT_TYPE_ERROR);
     }
@@ -392,28 +412,31 @@ public class Camera extends Plugin {
    * After processing the video, return the final result back to the caller.
    * @param call
    * @param movie
-   * @param u
+   * @param uri
    */
-  private void returnMovieResult(PluginCall call, InputStream movie, Uri u) {
-    if (settings.getResultType() != CameraResultType.BASE64) {
-      call.reject(INVALID_RESULT_TYPE_ERROR);
-    }
+  private void returnMovieResult(PluginCall call, InputStream movie, Uri uri) {
+    ExifWrapper exif = new ExifWrapper(null);
 
-    try {
-      ExifWrapper exif = new ExifWrapper(null);
+    if (settings.getResultType() == CameraResultType.BASE64 || settings.getResultType() == CameraResultType.DATAURL) {
+      try {
+        byte[] byteArray = readInMemory(movie);
 
-      ByteArrayOutputStream baos = new ByteArrayOutputStream();
-      int nRead;
-      byte[] data = new byte[2048];
-      while ((nRead = movie.read(data, 0, data.length)) != -1) {
-        baos.write(data, 0, nRead);
+        if (settings.getResultType() == CameraResultType.BASE64) {
+          returnBase64(call, exif, "mov", byteArray);
+
+        } else if (settings.getResultType() == CameraResultType.DATAURL) {
+          returnDataUrl(call, exif, "video", "mov", byteArray);
+        }
+
+      } catch (Exception e) {
+        call.reject(UNABLE_TO_PROCESS_VIDEO);
       }
-      baos.flush();
 
-      returnBase64(call, exif, "mov", baos.toByteArray());
-    } catch (Exception e) {
-      call.reject(UNABLE_TO_PROCESS_VIDEO);
-      return;
+    } else if (settings.getResultType() == CameraResultType.URI) {
+      returnFileURI(call, exif, "mov", uri);
+
+    } else {
+      call.reject(INVALID_RESULT_TYPE_ERROR);
     }
 
     // Result returned, clear stored paths
@@ -422,17 +445,29 @@ public class Camera extends Plugin {
     imageEditedFileSavePath = null;
   }
 
-  private void returnFileURI(PluginCall call, ExifWrapper exif, Bitmap bitmap, Uri u, ByteArrayOutputStream bitmapOutputStream) {
-    Uri newUri = getTempImage(bitmap, u, bitmapOutputStream);
-    if (newUri != null) {
+  private byte[] readInMemory(InputStream movie) throws IOException {
+    try (ByteArrayOutputStream baos = new ByteArrayOutputStream()) {
+      int nRead;
+      byte[] data = new byte[2048];
+      while ((nRead = movie.read(data, 0, data.length)) != -1) {
+        baos.write(data, 0, nRead);
+      }
+      baos.flush();
+
+      return baos.toByteArray();
+    }
+  }
+
+  private void returnFileURI(PluginCall call, ExifWrapper exif, String format, Uri uri) {
+    if (uri != null) {
       JSObject ret = new JSObject();
-      ret.put("format", "jpeg");
+      ret.put("format", format);
       ret.put("exif", exif.toJson());
-      ret.put("path", newUri.toString());
-      ret.put("webPath", FileUtils.getPortablePath(getContext(), bridge.getLocalUrl(), newUri));
+      ret.put("path", uri.toString());
+      ret.put("webPath", FileUtils.getPortablePath(getContext(), bridge.getLocalUrl(), uri));
       call.resolve(ret);
     } else {
-      call.reject(UNABLE_TO_PROCESS_IMAGE);
+      call.reject(UNABLE_TO_RETURN_FILE_URI);
     }
   }
 
@@ -442,7 +477,8 @@ public class Camera extends Plugin {
     try {
       bis = new ByteArrayInputStream(bitmapOutputStream.toByteArray());
       newUri = saveTemporaryImage(bitmap, u, bis);
-    } catch (IOException ex) {
+    } catch (IOException e) {
+      Logger.error(getLogTag(), e.getMessage(), e);
     } finally {
       if (bis != null) {
         try {
@@ -488,13 +524,12 @@ public class Camera extends Plugin {
     return bitmap;
   }
 
-  private void returnDataUrl(PluginCall call, ExifWrapper exif, ByteArrayOutputStream bitmapOutputStream) {
-    byte[] byteArray = bitmapOutputStream.toByteArray();
+  private void returnDataUrl(PluginCall call, ExifWrapper exif, String type, String format, byte[] byteArray) {
     String encoded = Base64.encodeToString(byteArray, Base64.NO_WRAP);
 
     JSObject data = new JSObject();
-    data.put("format", "jpeg");
-    data.put("dataUrl", "data:image/jpeg;base64," + encoded);
+    data.put("format", format);
+    data.put("dataUrl", "data:" + type + "/" + format + ";base64," + encoded);
     data.put("exif", exif.toJson());
     call.resolve(data);
   }
